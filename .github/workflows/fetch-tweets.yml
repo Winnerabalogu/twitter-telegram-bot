@@ -1,0 +1,16 @@
+name: Fetch Tweets
+
+on:
+  schedule:
+    - cron: '*/20 * * * *'  # This will run every 20 minutes
+
+jobs:
+  fetch_tweets:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Send request to Next.js API
+        run: |
+          curl -X GET "https://twitter-telegram-bot.vercel.app/api/telegram-bot"

@@ -1,85 +1,132 @@
-// app/api/telegram-bot/route.ts
+import { NextResponse } from "next/server";
 
-import axios from 'axios';
+export const maxDuration = 60;
+export const dynamic = "force-dynamic";
 
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;  // Your Telegram bot token
-const CHAT_ID = process.env.CHAT_ID;  // Your chat ID where you want to send the tweets
+const TWITTER_BEARER_TOKEN = process.env.TWITTER_BEARER_TOKEN;
+const TWITTER_SEARCH_URL = "https://api.twitter.com/2/tweets/search/recent";
 
-// Function to send messages to Telegram
-async function sendMessageToTelegram(message: string) {
-  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
-  const params = {
-    chat_id: CHAT_ID,
-    text: message,
-  };
+let tweetHistory: Tweet[] = [];  // In-memory array to store fetched tweets
 
+// Type definitions
+type Tweet = {
+  id: string;
+  text: string;
+  edit_history_tweet_ids: string[];
+};
+
+type Meta = {
+  newest_id: string;
+  oldest_id: string;
+  result_count: number;
+  next_token: string;
+};
+
+type TwitterApiResponse = {
+  data: Tweet[];
+  meta: Meta;
+};
+
+// Function to fetch tweets with the correct query parameters
+async function fetchTweets() {
   try {
-    await axios.post(url, params);
-    console.log("Message sent to Telegram successfully");
-  } catch (error) {
-    console.error("Error sending message to Telegram:", error);
+    console.log("Starting to fetch tweets...");
+
+    const query = "airdrop";  // Search query
+    const maxResults = 10;    // Number of tweets to return
+    const url = new URL(TWITTER_SEARCH_URL);
+    
+    // Append query parameters to the URL
+    url.searchParams.append("query", query);
+    url.searchParams.append("max_results", maxResults.toString());
+
+    console.log("Generated URL for fetching tweets:", url.toString());
+
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${TWITTER_BEARER_TOKEN}`,
+      },
+    });
+
+    console.log("Received response from Twitter API:", response);
+
+    if (!response.ok) {
+      console.error("Error fetching tweets. Status:", response.status, response.statusText);
+      throw new Error(`Error fetching tweets: ${response.statusText}`);
+    }
+
+    const data: TwitterApiResponse = await response.json();
+
+    console.log("Fetched data:", JSON.stringify(data, null, 2));
+
+    // Log the 'meta' details (pagination and result count)
+    if (data.meta) {
+      console.log("Pagination info:", data.meta);
+      console.log("Newest tweet ID:", data.meta.newest_id);
+      console.log("Oldest tweet ID:", data.meta.oldest_id);
+      console.log("Total result count:", data.meta.result_count);
+      console.log("Next token for pagination:", data.meta.next_token);
+    }
+
+    // Log the tweet text and details
+    data.data.forEach(tweet => {
+      console.log(`Tweet ID: ${tweet.id}`);
+      console.log(`Tweet Text: ${tweet.text}`);
+    });
+
+    return data;
+  } catch (error: any) {
+    console.error("Error fetching tweets:", error, error.message);
+    throw new Error("Failed to fetch tweets");
   }
 }
 
-// Function to fetch tweets with backoff
-async function fetchTweetsWithBackoff(attempt = 1) {
-  try {
-    const response = await axios.get(
-      "https://api.twitter.com/2/tweets/search/recent",
-      {
-        params: {
-          query: "airdrop",  // Simpler query for testing
-          max_results: 5,
-        },
-        headers: {
-          Authorization: `Bearer ${process.env.TWITTER_BEARER_TOKEN}`,
-        },
-      }
-    );
+// Function to retry fetching tweets every 15 minutes
+async function retryFetchTweets() {
+  let attempt = 0;
+  while (attempt < 3) {
+    try {
+      console.log(`Attempt ${attempt + 1} to fetch tweets...`);
 
-    const tweets = response.data.data;
-    if (tweets) {
-      for (const tweet of tweets) {
-        const message = `New Tweet: \n\n${tweet.text}\n\nLink: https://twitter.com/twitter/status/${tweet.id}`;
-        await sendMessageToTelegram(message);
-      }
-    }
-    return tweets;
-  } catch (error) {
-    if (axios.isAxiosError(error)) {
-      if (error.response && error.response.status === 429) {
-        const retryAfter = error.response.headers["retry-after"];
-        const resetTime = error.response.headers["x-ratelimit-reset"];
-        const currentTime = Math.floor(Date.now() / 1000); // Current time in seconds
-        let delay = retryAfter ? parseInt(retryAfter) * 1000 : Math.pow(2, attempt) * 1000;
+      const tweets = await fetchTweets();
+      tweetHistory = [...tweetHistory, ...tweets.data];  // Append new tweets to the history
 
-        if (resetTime) {
-          // Wait until the rate limit resets
-          const waitTime = Math.max(0, resetTime - currentTime) * 1000;
-          delay = waitTime > delay ? waitTime : delay;
-        }
+      console.log("Tweets fetched successfully:", JSON.stringify(tweets.data, null, 2));
+      break;
+    } catch (error: any) {
+      attempt++;
+      console.error(`Attempt ${attempt}: ${error.message}`);
 
-        console.log(`Rate limit exceeded. Retrying after ${delay / 1000} seconds...`);
-        await new Promise(resolve => setTimeout(resolve, delay));
-        return fetchTweetsWithBackoff(attempt + 1); // Retry with increased attempt count
+      if (attempt < 3) {
+        console.log("Retrying in 15 minutes...");
+        await new Promise(resolve => setTimeout(resolve, 900000));  // 15 minutes
       } else {
-        // Handle other potential errors
-        console.error("Error response from Axios:", error.response);
-        throw error;
+        console.error("Failed to fetch tweets after 3 attempts");
       }
-    } else {
-      console.error("Unknown error:", error);
-      throw error;
     }
   }
 }
 
-// Export GET method
 export async function GET() {
+  console.log("Starting GET request...");
+
   try {
-    const tweets = await fetchTweetsWithBackoff();  // Fetch tweets
-    return new Response(JSON.stringify(tweets), { status: 200 }); // Send response with fetched tweets
-  } catch (error) {
-    return new Response("Error fetching tweets", { status: 500 });
+    // Retry logic for fetching tweets
+    await retryFetchTweets();
+
+    // Returning accumulated tweets as a JSON response
+    console.log("Returning response with tweets...");
+    return Response.json({
+      success: true,
+      data: tweetHistory,
+      message: "Tweets fetched successfully",
+    });
+  } catch (error: any) {
+    console.error("Error handling GET request:", error.message);
+    return Response.json({
+      success: false,
+      message: "Error fetching tweets",
+    });
   }
 }
